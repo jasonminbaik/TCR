@@ -1,0 +1,211 @@
+library(caret)
+library(rootSolve)
+library(e1071)
+
+# create function for modified sum only to consider finite values (used in EM)
+sum.finite <- function(x) {
+  sum(x[is.finite(x)])
+}
+
+# create dataframe to store answers
+est <- data.frame(matrix(ncol = 10, nrow = 0))
+colnames(est) <- c("est_mu1", "est_mu2", "est_sig1", "est_sig2", "est_pi0", "est_pi1", "est_pi2", "cut_off", "FDR", "TPR")
+
+
+for (t in c(1:1000)){
+  # set known truth parameter estimates
+  n <- 100
+
+  m1 <- 2
+  m2 <- 5
+  s1 <- 0.25
+  s2 <- .5
+  
+  # generate random uniform numbers between 0 & 1
+  sim <- runif(n, 0, 1)
+  # create dataframe of random values
+  sim <- as.data.frame(sim)
+  
+  # list of distribution values
+  x <- c()
+  # make list into dataframe
+  x <- as.data.frame(x)
+  
+  # create truth dataframe 
+  truth <- data.frame(matrix(ncol = 1, nrow = n))
+  colnames(truth) <- c("truth")
+  
+  # pi0 = 0.1, pi1 = 0.2, pi2 = 0.7
+  for (y in c(1:n)){
+    if (sim[y,1] < 0.1) {
+      x[y,1] <- 0
+      truth[y,1] <- "one"
+    } else if (0.1 <= sim[y,1] & sim[y,1] < 0.3) {
+      x[y,1] <- rnorm(1, m1, s1)
+      truth[y,1] <- "one"
+    } else {
+      x[y,1] <- rnorm(1, m2, s2)
+      truth[y,1] <- "two"
+    }
+  }
+  
+  # x[,1]
+  
+  # convert dataframe x into a matrix to use in k-means
+  x <- as.matrix(x)
+  
+  # assign random starting values
+  # real: pi0 = 0.1, pi1 = 0.2, pi2 = 0.7
+  pi0 <- 0.05
+  pi1 <- 0.1
+  pi2 <- 1-pi0-pi1
+  # m1 = 1, m2 = 4, s1 = 0.5, s2 = 1
+  mu1 <- 2.5
+  mu2 <- 3
+  sigma1 <- 1
+  sigma2 <- 3
+  
+  # set indicator function for data set x
+  I0 <- as.numeric(x==0)
+  I1 <- as.numeric(x!=0)
+  # begin EM algorithm
+  # initialize Q value
+  Q <- 0
+  
+  pi.p0 <- pi0*I0 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+  pi.p1 <- pi1*dnorm(x, mu1, sigma1)*I1 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+  pi.p2 <- pi2*dnorm(x, mu2, sigma2)*I1 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+  
+  
+  # starting value from expected value of the log likelihood
+  Q[2] <- sum.finite(pi.p0 * log(pi0)+ pi.p1 * log(pi1*dnorm(x, mu1, sigma1))+pi.p2 * log(pi2*dnorm(x, mu2, sigma2)))
+  
+  # initialize k value
+  k <- 2
+  
+  while (abs(Q[k]-Q[k-1])>=1e-6) {
+    ###### E step ######
+    
+    pi.p0 <- pi0*I0 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+    pi.p1 <- pi1*dnorm(x, mu1, sigma1)*I1 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+    pi.p2 <- pi2*dnorm(x, mu2, sigma2)*I1 / (pi0*I0 + pi1*dnorm(x, mu1, sigma1)*I1 + pi2*dnorm(x, mu2, sigma2)*I1)
+    
+    ###### M step ######
+    pi0 <- sum.finite(pi.p0) / length(x)
+    pi1 <- sum.finite(pi.p1) / length(x)
+    pi2 <- sum.finite(pi.p2) / length(x)
+    
+    # recalculate lambda's
+    mu1 <- sum.finite(pi.p1 * x) / sum.finite(pi.p1)
+    mu2 <- sum.finite(pi.p2 * x) / sum.finite(pi.p2)
+    
+    sigma1 <- sqrt(sum.finite(pi.p1 * (x-mu1)^2) / sum.finite(pi.p1))
+    sigma2 <- sqrt(sum.finite(pi.p2 * (x-mu2)^2) / sum.finite(pi.p2))
+    
+    k <- k + 1
+    Q[k] <- sum.finite(pi.p0 * log(pi0)+ pi.p1 * log(pi1*dnorm(x, mu1, sigma1))+pi.p2 * log(pi2*dnorm(x, mu2, sigma2)))
+  }
+  
+  
+  ##############################################################################################################################################
+  p.cut <- 0.95
+  poster.lik <- function(x)
+  {
+    i0 <- as.numeric(x==0)
+    i1 <- as.numeric(x!=0)
+    # posterior probability of fA(x), with x's sorted. 
+    (pi2*dnorm(x, mu2, sigma2)*i1) / ((pi0*i0) + (pi1*dnorm(x, mu1, sigma1)*i1) + (pi2*dnorm(x, mu2, sigma2)*i1))
+  }
+  
+  # sort the randomly generated numbers
+  x.sorted <- sort(x)
+  # combine sorted numbers and their posterior probability
+  matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+  # determine which posterior prob. is greater than 0.95
+  index <- which(matrix.lik[,2]>p.cut)
+  # find the root
+  roots <- matrix.lik[index[1],1]
+  
+  
+  # create decision dataframe to store
+  dec <- data.frame(matrix(ncol = 1, nrow = n))
+  
+  # using the cut-off value, make decision
+  for (r in c(1:n)){
+    if (x[r,1] < roots){
+      dec[r,1] <- "one"
+    } else {
+      dec[r,1] <- "two"
+    }
+  }
+  
+  
+  # change truth and dec data.frame values into factors
+  truth[,1] <- as.factor(truth[,1])
+  truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+  dec[,1] <- as.factor(dec[,1])
+  dec[,1] <- factor(dec[,1], levels=c("two", "one"))
+  
+  # confusion matrix (predicted, actual)
+  cm <- confusionMatrix(dec[,1], truth[,1])
+  
+  # calculate the FDR
+  fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+  
+  # calculate the TPR
+  tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+  
+  # save all parameter and other values
+  add <- list(mu1, mu2, sigma1, sigma2, pi0, pi1, pi2, roots, fdr, tpr)
+  est<- rbind(est, add, stringsAsFactors=FALSE)
+  
+}
+
+colnames(est) <- c("est_mu1", "est_mu2", "est_sig1", "est_sig2", "est_pi0", "est_pi1", "est_pi2", "cut_off", "FDR", "TPR")
+est
+# View(est)
+
+# estimate average of 1000 parameters from simulation
+avg_mu1 <- sum(est[1]) / 1000
+avg_mu2 <- sum(est[2]) / 1000
+avg_sig1 <- sum(est[3]) / 1000
+avg_sig2 <- sum(est[4]) / 1000
+avg_pi0 <- sum(est[5]) / 1000
+avg_pi1 <- sum(est[6]) / 1000
+avg_pi2 <- sum(est[7]) / 1000
+avg_cut <- sum(est[8]) / 1000
+avg_fdr <- sum(est[9]) / 1000
+avg_tpr <- sum(est[10]) / 1000
+
+# create dataframe to store avg parameters
+avg_para <- data.frame(matrix(ncol = 10, nrow = 0))
+
+# save averaged parameters
+inc <- list(avg_mu1, avg_mu2, avg_sig1, avg_sig2, avg_pi0, avg_pi1, avg_pi2, avg_cut, avg_fdr, avg_tpr)
+avg_para<- rbind(avg_para, inc)
+colnames(avg_para) <- c("est_mu1", "est_mu2", "est_sig1", "est_sig2", "est_pi0","est_pi1", "est_pi2",  "cut_off", "est_fdr", "est_tpr")
+
+avg_para
+
+# standard deviation
+est_mu1 <- sd(est[,1])
+est_mu2 <- sd(est[,2])
+est_sig1 <- sd(est[,3]) 
+est_sig2 <- sd(est[,4])
+est_pi0 <- sd(est[,5])
+est_pi1 <- sd(est[,6])
+est_pi2 <- sd(est[,7])
+est_cut <- sd(est[,8])
+est_fdr <- sd(est[,9])
+est_tpr <- sd(est[,10])
+
+# create dataframe to store sd
+est_sd <- data.frame(matrix(ncol = 10, nrow = 0))
+
+# save averaged parameters
+ad <- list(est_mu1, est_mu2, est_sig1, est_sig2, est_pi0,est_pi1, est_pi2, est_cut, est_fdr,est_tpr)
+est_sd<- rbind(est_sd, ad)
+colnames(est_sd) <- c("est_mu1", "est_mu2", "est_sig1", "est_sig2", "est_pi0","est_pi1", "est_pi2",  "cut_off", "est_fdr", "est_tpr")
+
+est_sd
+
