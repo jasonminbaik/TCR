@@ -1,0 +1,720 @@
+# norm
+library(caret)
+library(rootSolve)
+library(e1071)
+# pois
+library(caret)
+# for str_count
+library(stringr)
+
+############################## Scenario 1: Simulated Log-Transformed Zero-Inflated Mixed Gaussian ############################## 
+
+n <- 100 # sample size
+
+# create dataframe to store answers
+est <- data.frame(matrix(ncol = 4, nrow = 0))
+colnames(est) <- c("cut.off", "distribution", "fdr", "tpr")
+
+# begin simulation
+for (g in c(1:1000)){
+  
+  # set random truth parameters
+  m1 <- 2.5
+  m2 <- 4
+  s1 <- .04
+  s2 <- .1
+
+  # generate random uniform numbers between 0 & 1
+  sim <- runif(n, 0, 1)
+  # create dataframe of random values
+  sim <- as.data.frame(sim)
+  
+  # make list into dataframe
+  x <- as.data.frame(matrix(nrow = 0, ncol=1))
+  
+  # create truth dataframe 
+  truth <- data.frame(matrix(ncol = 1, nrow = 0))
+  #colnames(truth) <- c("truth")
+  
+  # pi0 = 0.1, pi1 = 0.2, pi2 = 0.7
+  # Generating the truth from ZIMN
+  for (y in c(1:n)){
+    if (sim[y,1] < 0.1) {
+      x[y,1] <- 0
+      truth[y,1] <- "one"
+    } else if (0.1 <= sim[y,1] & sim[y,1] < 0.3) {
+      x[y,1] <- rnorm(1, m1, s1)
+      truth[y,1] <- "one"
+    } else {
+      x[y,1] <- rnorm(1, m2, s2)
+      truth[y,1] <- "two"
+    }
+  }
+  
+  x <- as.matrix(x[,1])
+  
+  # shifted poisson
+  x0 <- as.integer(exp(x))
+  x0 <- x0-1
+  
+  # log-transformed normal
+  x00 <- log(x0+1)
+  
+  ################################### Log-Transformed Mixed Gaussian Parameter Estimates ################################### 
+  # assign random starting values
+  pi1 <- 0.3
+  pi2 <- 1-pi1
+  mu1 <- 3.5
+  mu2 <- 6
+  sigma1 <- .07
+  sigma2 <- .3
+  
+  pi.p1 <- pi1*dnorm(x00, mu1, sigma1) / (pi1*dnorm(x00, mu1, sigma1) + pi2*dnorm(x00, mu2, sigma2))
+  pi.p2 <- pi2*dnorm(x00, mu2, sigma2) / (pi1*dnorm(x00, mu1, sigma1) + pi2*dnorm(x00, mu2, sigma2))
+  
+  Q <- data.frame(matrix(nrow=1,ncol=6))
+  Q[1,] <- cbind(c(0, 0, 0, 0,0,0))
+  Q[2,] <- cbind(c(mu1, mu2, sigma1, sigma2, pi1, pi2))
+  
+  # initialize k value
+  k <- 2
+  
+  # LMG EM algorithm
+  while (max(abs(Q[k,]-Q[k-1,])) >= 10e-4) {
+    
+    ###### E step ######
+    pi.p1 <- pi1*dnorm(x00, mu1, sigma1)/ (pi1*dnorm(x00, mu1, sigma1) + pi2*dnorm(x00, mu2, sigma2))
+    pi.p2 <- pi2*dnorm(x00, mu2, sigma2) / (pi1*dnorm(x00, mu1, sigma1) + pi2*dnorm(x00, mu2, sigma2))
+    
+    ###### M step ######
+    pi1 <- sum(pi.p1) / length(x00)
+    pi2 <- sum(pi.p2) / length(x00)
+    
+    # recalculate lambda's
+    mu1 <- sum(pi.p1 * x00) / sum(pi.p1)
+    mu2 <- sum(pi.p2 * x00) / sum(pi.p2)
+    
+    sigma1 <- sqrt(sum(pi.p1 * ((x00-mu1)^2)) / sum(pi.p1))
+    sigma2 <- sqrt(sum(pi.p2 * ((x00-mu2)^2)) / sum(pi.p2))
+    
+    k <- k + 1
+    Q[k,] <- cbind(c(mu1, mu2, sigma1, sigma2, pi1, pi2))
+    
+  }
+  
+  # reorder parameters if switched
+  if (mu1 > mu2){
+    rep1 <- mu1
+    rep2 <- mu2
+    reps1 <- sigma1
+    reps2 <- sigma2
+    prob1 <- pi1
+    prob2 <- pi2
+    prop1 <- pi.p1
+    prop2 <- pi.p2
+    
+    mu1 <- rep2
+    mu2 <- rep1
+    sigma1 <- reps2
+    sigma2 <- reps1
+    pi1 <- prob2
+    pi2 <- prob1
+    pi.p1 <- prop2
+    pi.p2 <- prop1
+    
+  } else {
+    mu1 <- mu1
+    mu2 <- mu2
+    sigma1 <- sigma1
+    sigma2 <- sigma2
+    pi1 <- pi1
+    pi2 <- pi2
+    pi.p1 <- pi.p1
+    pi.p2 <- pi.p2
+    
+  }
+  
+  MN.mu1 <- mu1
+  MN.mu2 <- mu2
+  MN.sig1 <- sigma1
+  MN.sig2 <- sigma2
+  MN.pi1 <- pi1
+  MN.pi2 <- pi2
+  
+  ################################### Log-Transformed Zero-Inflated Mixed Gaussian Parameter Estimates ################################### 
+  
+  # assign random starting values
+  pi0 <- 0.05
+  pi1 <- 0.1
+  pi2 <- 1-pi0-pi1
+  mu1 <- 3.5
+  mu2 <- 6
+  sigma1 <- 1
+  sigma2 <- 2
+  
+  # set indicator function for data set x
+  I0 <- as.numeric(x00==0)
+  I1 <- as.numeric(x00!=0)
+  
+  # initialize Q value
+  Q <- 0
+  
+  pi.p0 <- pi0*I0 / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+  pi.p1 <- pi1*dnorm(x00, mu1, sigma1)*I1 / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+  pi.p2 <- pi2*dnorm(x00, mu2, sigma2)*I1 / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+  
+  Q <- data.frame(matrix(nrow=1,ncol=7))
+  Q[1,] <- cbind(c(0, 0, 0, 0, 0,0, 0))
+  Q[2,] <- cbind(c(mu1, mu2, sigma1, sigma2, pi0, pi1, pi2))
+  
+  # initialize k value
+  k <- 2
+  
+  # EM algorithm
+  while (max(abs(Q[k,]-Q[k-1,])) >= 10e-4) {
+    ###### E step ######
+    
+    pi.p0 <- (pi0*I0) / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+    pi.p1 <- (pi1*dnorm(x00, mu1, sigma1)*I1) / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+    pi.p2 <- (pi2*dnorm(x00, mu2, sigma2)*I1) / (pi0*I0 + pi1*dnorm(x00, mu1, sigma1)*I1 + pi2*dnorm(x00, mu2, sigma2)*I1)
+    
+    ###### M step ######
+    pi0 <- sum(pi.p0) / length(x00)
+    pi1 <- sum(pi.p1) / length(x00)
+    pi2 <- sum(pi.p2) / length(x00)
+    
+    # recalculate lambda's
+    mu1 <- sum(pi.p1 * x00) / sum(pi.p1)
+    mu2 <- sum(pi.p2 * x00) / sum(pi.p2)
+    
+    sigma1 <- sqrt(sum(pi.p1 * (x00-mu1)^2) / sum(pi.p1))
+    sigma2 <- sqrt(sum(pi.p2 * (x00-mu2)^2) / sum(pi.p2))
+    
+    k <- k + 1
+    Q[k,] <- cbind(c(mu1, mu2, sigma1, sigma2, pi0, pi1, pi2))
+    
+  }
+  
+  # reorder parameters if switched
+  if (mu1 > mu2){
+    rep1 <- mu1
+    rep2 <- mu2
+    reps1 <- sigma1
+    reps2 <- sigma2
+    prob1 <- pi1
+    prob2 <- pi2
+    prop1 <- pi.p1
+    prop2 <- pi.p2
+    
+    mu1 <- rep2
+    mu2 <- rep1
+    sigma1 <- reps2
+    sigma2 <- reps1
+    pi1 <- prob2
+    pi2 <- prob1
+    pi.p1 <- prop2
+    pi.p2 <- prop1
+    pi.p0 <- pi.p0
+    
+  } else {
+    mu1 <- mu1
+    mu2 <- mu2
+    sigma1 <- sigma1
+    sigma2 <- sigma2
+    pi1 <- pi1
+    pi2 <- pi2
+    pi.p1 <- pi.p1
+    pi.p2 <- pi.p2
+    pi.p0 <- pi.p0
+  }
+  
+  ZIMN.mu1 <- mu1
+  ZIMN.mu2 <- mu2
+  ZIMN.sig1 <- sigma1
+  ZIMN.sig2 <- sigma2
+  ZIMN.pi0 <- pi0
+  ZIMN.pi1 <- pi1
+  ZIMN.pi2 <- pi2
+  
+  ################################### Shifted Mixed Poisson Parameter Estimates ################################### 
+  # assign random starting values
+  lambda1 <- 2
+  lambda2 <- 5
+  pi1 <- .2
+  pi2 <- .8
+  
+  p1 <- pi1*dpois(x0, lambda1)/(pi1*dpois(x0, lambda1) + pi2*dpois(x0, lambda2))
+  p2 <- pi2*dpois(x0, lambda2)/(pi1*dpois(x0, lambda1) + pi2*dpois(x0, lambda2))
+  
+  Q <- data.frame(matrix(nrow=1,ncol=4))
+  Q[1,] <- cbind(c(0, 0,0,0))
+  Q[2,] <- cbind(c(lambda1,lambda2, pi1,pi2))
+  
+  k <- 2
+  
+  # EM algorithm
+  while (max(abs(Q[k,]-Q[k-1,])) >=10e-4) {
+    ###### E step ######
+    p1 <- pi1 * dpois(x0, lambda1) / (pi1 * dpois(x0, lambda1) + pi2 * dpois(x0, lambda2))
+    p2 <- pi2 * dpois(x0, lambda2) / (pi1 * dpois(x0, lambda1) + pi2 * dpois(x0, lambda2))
+    
+    ###### M step ######
+    # pi1 & pi2 compute using the p1 and p2 from the previous iteration 
+    pi1 <- sum(p1) / length(x0)
+    pi2 <- sum(p2) / length(x0)
+    
+    # recalculate lambda's
+    lambda1 <- sum(p1 * x0) / sum(p1)
+    lambda2 <- sum(p2 * x0) / sum(p2)
+    
+    k <- k + 1
+    Q[k,] <- cbind(c(lambda1,lambda2, pi1,pi2))
+  }
+  
+  # redorder parameters if switched
+  if (lambda1 > lambda2){
+    rep1 <- lambda1
+    rep2 <- lambda2
+    prob1 <- pi1
+    prob2 <- pi2
+    prop1 <- p1
+    prop2 <- p2
+    
+    lambda1 <- rep2
+    lambda2 <- rep1
+    pi1 <- prob2
+    pi2 <- prob1
+    p1 <- prop2
+    p2 <- prop1
+    
+  } else {
+    lambda1 <- lambda1
+    lambda2 <- lambda2
+    pi1 <- pi1
+    pi2 <- pi2
+    p1 <- p1
+    p2 <- p2
+  }
+  
+  # estimate average of 1000 parameters from simulation
+  MP.lambda1 <- lambda1
+  MP.lambda2 <- lambda2
+  MP.pi1 <- pi1
+  MP.pi2 <- pi2
+  
+  ################################### Zero Inflated Shifted Mixed Poisson Parameter Estimates ################################### 
+  
+  # assign random starting values
+  lambda1 <- 2
+  lambda2 <- 5
+  pi0 <- 0.2
+  pi1 <- 0.2
+  pi2 <- 1-pi0-pi1
+  
+  # set indicator function for data set x
+  # OLD
+  #I0 <- as.numeric(x ==0)
+  #I1 <- as.numeric(x>0)
+  # New
+  I0 <- as.numeric(x0==0)
+  I1 <- as.numeric(x0>=0)
+  
+  Q <- 0
+  #initial estimation of E step:
+  pi.p0 <- pi0*I0/(pi0*I0 + pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+  pi.p1 <- pi1*dpois(x0, lambda1)*I1/(pi0*I0+pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+  pi.p2 <- pi2*dpois(x0, lambda2)*I1/(pi0*I0+pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+  
+  Q <- data.frame(matrix(nrow=1,ncol=5))
+  Q[1,] <- cbind(c(0, 0,0,0,0))
+  Q[2,] <- cbind(c(lambda1,lambda2, pi0, pi1,pi2))
+  k <- 2
+  
+  while (max(abs(Q[k,]-Q[k-1,])) >=10e-4) {
+    ###### E step ######
+    
+    pi.p0 <- pi0*I0/(pi0*I0 + pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+    pi.p1 <- pi1*dpois(x0, lambda1)*I1/(pi0*I0+pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+    pi.p2 <- pi2*dpois(x0, lambda2)*I1/(pi0*I0+pi1*dpois(x0, lambda1)*I1 + pi2*dpois(x0, lambda2)*I1)
+    
+    ###### M step ######
+    pi0 <- sum(pi.p0) / length(x0)
+    pi1 <- sum(pi.p1) / length(x0)
+    pi2 <- sum(pi.p2) / length(x0)
+    
+    # recalculate lambda's
+    lambda1 <- sum(pi.p1 * x0) / sum(pi.p1)
+    lambda2 <- sum(pi.p2 * x0) / sum(pi.p2)
+    
+    k <- k + 1
+    Q[k,] <- cbind(c(lambda1,lambda2, pi0, pi1,pi2))
+  }
+  
+  # reorder parameters if switched
+  if (lambda1 > lambda2){
+    rep1 <- lambda1
+    rep2 <- lambda2
+    prob1 <- pi1
+    prob2 <- pi2
+    prop1 <- pi.p1
+    prop2 <- pi.p2
+    
+    lambda1 <- rep2
+    lambda2 <- rep1
+    pi1 <- prob2
+    pi2 <- prob1
+    p1 <- prop2
+    p2 <- prop1
+    
+  } else {
+    lambda1 <- lambda1
+    lambda2 <- lambda2
+    pi1 <- pi1
+    pi2 <- pi2
+    p1 <- pi.p1
+    p2 <- pi.p2
+  }
+  
+  ZIMP.lambda1 <- lambda1
+  ZIMP.lambda2 <- lambda2
+  ZIMP.pi0 <- pi0
+  ZIMP.pi1 <- pi1
+  ZIMP.pi2 <- pi2
+  
+  ###############################################################################################################
+  # store p-values
+  store <- data.frame(c())
+  
+  # number of random numbers to generate
+  a <- 1000
+  
+  # generate LZMG numbers
+  sim <- runif(a, 0, 1)
+  # create dataframe of random values
+  sim <- as.data.frame(sim)
+  
+  # store simulated values for distributions 
+  x.MN <- as.data.frame(c())
+  x.ZIMN <- as.data.frame(c())
+  x.MP <- as.data.frame(c())
+  x.ZIMP <- as.data.frame(c())
+  
+  # LMG
+  for (y in c(1:a)){
+    if (sim[y,1] < MN.pi1){
+      x.MN[y,1] <- rnorm(1, MN.mu1, MN.sig1)
+    } else {
+      x.MN[y,1] <- rnorm(1, MN.mu2, MN.sig2)
+    }
+  }
+  
+  # LZMG
+  for (y in c(1:a)){
+    if (sim[y,1] < ZIMN.pi0) {
+      x.ZIMN[y,1] <- 1
+    } else if (ZIMN.pi0 <= sim[y,1] & sim[y,1] < (ZIMN.pi0 + ZIMN.pi1)) {
+      x.ZIMN[y,1] <- rnorm(1, ZIMN.mu1, ZIMN.sig1)
+    } else {
+      x.ZIMN[y,1] <- rnorm(1, ZIMN.mu2, ZIMN.sig2)
+    }
+  }
+  
+  # SMP
+  for (y in c(1:a)){
+    if (sim[y,1] < MP.pi1) {
+      x.MP[y,1] <- rpois(1, lambda = MP.lambda1)
+    } else {
+      x.MP[y,1] <- rpois(1, lambda = MP.lambda2)
+    }
+  }
+  
+  # SZMP
+  for (y in c(1:a)){
+    if (sim[y,1] < ZIMP.pi0) {
+      x.ZIMP[y,1] <- 0
+    } else if (ZIMP.pi0 <= sim[y,1] & sim[y,1] < (ZIMP.pi0+ZIMP.pi1)) {
+      x.ZIMP[y,1] <- rpois(1, lambda = ZIMP.lambda1)
+    } else {
+      x.ZIMP[y,1] <- rpois(1, lambda = ZIMP.lambda2)
+    }
+  }
+  
+  # Goodness of fit test
+  # LMG
+  mn.stat<- ks.test(x00, y=x.MN[,1], alternative = "two.sided")$p.value
+  store[1,1] <- mn.stat[1]
+  # LZMG
+  zimn.stat <- ks.test(x00, y=x.ZIMN[,1], alternative = "two.sided")$p.value
+  store[1,2] <- zimn.stat[1]
+  # SMP
+  mp.stat <- ks.test(x0, y=x.MP[,1], alternative = "two.sided")$p.value
+  store[1,3] <- mp.stat[1]
+  # SZMP
+  zimp.stat <- ks.test(x0, y=x.ZIMP[,1], alternative = "two.sided")$p.value
+  store[1,4] <- zimp.stat[1]
+  
+  # store the p-value
+  dec <- max(store[1,])
+  
+
+  if (dec == store[1,1]){
+    # LMG Cutoff
+    p.cut <- 0.95
+    poster.lik <- function(x)
+    {
+      (MN.pi2*dnorm(x.sorted, MN.mu2, MN.sig2)) / ((MN.pi1*dnorm(x.sorted, MN.mu1, MN.sig1)) + (MN.pi2*dnorm(x.sorted, MN.mu2, MN.sig2)))
+    }
+    
+    # sort the randomly generated numbers
+    x.sorted <- sort(x00)
+    # combine sorted numbers and their posterior probability
+    matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+    # determine which posterior prob. is greater than 0.95
+    index <- which(matrix.lik[,2]>p.cut)
+    
+    # find the root
+    roots <- matrix.lik[[index[1],1]]
+    
+    # create decision dataframe
+    decis <- data.frame(matrix(ncol = 1, nrow = 0))
+    
+    # using the cut-off value, make decision
+    for (r in c(1:n)){
+      if (x00[r] < roots){
+        decis[r,1] <- "one"
+      } else {
+        decis[r,1] <- "two"
+      }
+    }
+    
+    # change truth and dec data.frame values into factors
+    truth[,1] <- as.factor(truth[,1])
+    truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+    # two should be first, and 1 is two. Two is null, one is alternative
+    decis[,1] <- as.factor(decis[,1])
+    decis[,1] <- factor(decis[,1], levels=c("two", "one"))
+    
+    # confusion matrix (predicted, actual)
+    cm <- confusionMatrix(decis[,1], truth[,1])
+    
+    # calculate the FDR
+    fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+    
+    # calculate the TPR
+    tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+    
+    # save all parameter and other values
+    est[g,1] <- roots
+    est[g,2] <- "MN"
+    est[g,3] <- fdr
+    est[g,4] <- tpr
+    
+  } else if (dec == store[1,2]){
+    # LZMG Cutoff
+    
+    p.cut <- 0.95
+    poster.lik <- function(x)
+    {
+      #i0 <- as.numeric(x.sorted==1)
+      #i1 <- as.numeric(x.sorted!=1)
+      i0 <- as.numeric(x.sorted==0)
+      i1 <- as.numeric(x.sorted!=0)
+      (ZIMN.pi2*dnorm(x.sorted, ZIMN.mu2, ZIMN.sig1)*i1) / ((ZIMN.pi0*i0) + (ZIMN.pi1*dnorm(x.sorted, ZIMN.mu1, ZIMN.sig1)*i1) + (ZIMN.pi2*dnorm(x.sorted, ZIMN.mu2, ZIMN.sig2)*i1))
+    }
+    
+    # sort the randomly generated numbers
+    x.sorted <- sort(x00)
+    # combine sorted numbers and their posterior probability
+    matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+    # determine which posterior prob. is greater than 0.95
+    index <- which(matrix.lik[,2]>p.cut)
+    
+    # find the root
+    roots <- matrix.lik[[index[1],1]]
+    
+    # create decision dataframe
+    decis <- data.frame(matrix(ncol = 1, nrow = 0))
+    
+    # using the cut-off value, make decision
+    for (r in c(1:n)){
+      if (x00[r] < roots){
+        decis[r,1] <- "one"
+      } else {
+        decis[r,1] <- "two"
+      }
+    }
+    # change truth and dec data.frame values into factors
+    truth[,1] <- as.factor(truth[,1])
+    truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+    # two should be first, and 1 is two. Two is null, one is alternative
+    decis[,1] <- as.factor(decis[,1])
+    decis[,1] <- factor(decis[,1], levels=c("two", "one"))
+    
+    # confusion matrix (predicted, actual)
+    cm <- confusionMatrix(decis[,1], truth[,1])
+    
+    # calculate the FDR
+    fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+    
+    # calculate the TPR
+    tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+
+    est[g,1] <- roots
+    est[g,2] <- "ZIMN"
+    est[g,3] <- fdr
+    est[g,4] <- tpr
+    
+  } else if (dec == store[1,3]){
+    # SMP Cutoff
+    
+    p.cut <- 0.95
+    poster.lik <- function(x)
+    {
+      (MP.pi2*dpois(x.sorted, MP.lambda2)) / ((MP.pi1*dpois(x.sorted, MP.lambda1)) + (MP.pi2*dpois(x.sorted, MP.lambda2)))
+    }
+    
+    # sort the randomly generated numbers
+    x.sorted <- sort(x0)
+    # combine sorted numbers and their posterior probability
+    matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+    # determine which posterior prob. is greater than 0.95
+    index <- which(matrix.lik[,2]>p.cut)
+    #index <- length(which(matrix.lik[,2]>p.cut))
+    
+    # find the root
+    roots <- matrix.lik[[index[1],1]]
+    #roots <- matrix.lik[index,1]
+    
+    # create decision dataframe
+    decis <- data.frame(matrix(nrow = 0, ncol = 1))
+    #colnames(decis) <- c("decision")
+    
+    # using the cut-off value, make decision
+    for (r in c(1:n)){
+      if (x0[r] <= roots){
+        decis[r,1] <- "one"
+      } else {
+        decis[r,1] <- "two"
+      }
+    }
+    
+    # change truth and dec data.frame values into factors
+    truth[,1] <- as.factor(truth[,1])
+    truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+    # two should be first, and 1 is two. Two is null, one is alternative
+    decis[,1] <- as.factor(decis[,1])
+    decis[,1] <- factor(decis[,1], levels=c("two", "one"))
+    
+    # confusion matrix (predicted, actual)
+    cm <- confusionMatrix(decis[,1], truth[,1])
+    
+    # calculate the FDR
+    fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+    
+    # calculate the TPR
+    tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+    
+    est[g,1] <- roots
+    est[g,2] <- "MP"
+    est[g,3] <- fdr
+    est[g,4] <- tpr
+    
+  } else {
+    # SZMP Cutoff
+    
+    p.cut <- 0.95
+    poster.lik <- function(x)
+    {
+      i0 <- as.numeric(x.sorted==0)
+      #i1 <- as.numeric(x.sorted%%1==0 & x.sorted>=0)
+      i1 <- as.numeric(x.sorted>=0)
+      # posterior probability of fA(x), with x's sorted. 
+      (ZIMP.pi2*dpois(x.sorted, ZIMP.lambda2)*i1) / ((ZIMP.pi0*i0) + (ZIMP.pi1*dpois(x.sorted, ZIMP.lambda1)*i1) + (ZIMP.pi2*dpois(x.sorted, ZIMP.lambda2))*i1)
+    }
+    
+    # sort the randomly generated numbers
+    x.sorted <- sort(x0)
+    # combine sorted numbers and their posterior probability
+    matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+    # determine which posterior prob. is greater than 0.95
+    index <- which(matrix.lik[,2]>p.cut)
+    
+    # find the root
+    roots <- matrix.lik[[index[1],1]]
+    
+    # create decision dataframe
+    decis <- data.frame(matrix(nrow = 0, ncol = 1))
+    
+    # using the cut-off value, make decision
+    for (r in c(1:n)){
+      if (x0[r] <= roots){
+        decis[r,1] <- "one"
+      } else {
+        decis[r,1] <- "two"
+      }
+    }
+    
+    # change truth and dec data.frame values into factors
+    truth[,1] <- as.factor(truth[,1])
+    truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+    # two should be first, and 1 is two. Two is null, one is alternative
+    decis[,1] <- as.factor(decis[,1])
+    decis[,1] <- factor(decis[,1], levels=c("two", "one"))
+    
+    # confusion matrix (predicted, actual)
+    cm <- confusionMatrix(decis[,1], truth[,1])
+    
+    # calculate the FDR
+    fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+    
+    # calculate the TPR
+    tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+    
+    est[g,1] <- roots
+    est[g,2] <- "ZIMP"
+    est[g,3] <- fdr
+    est[g,4] <- tpr
+    
+  }
+  
+  
+}
+
+colnames(est) <- c("cut.off", "distribution", "fdr", "tpr")
+est
+
+# estimate average of 1000 parameters from simulation
+(avg_cutoff <- mean(est[,1]))
+(sd_cutoff <- sd(est[,1]))
+(avg_fdr <- mean(est[,3]))
+(sd_fdr <- sd(est[,3]))
+(avg_tpr <- mean(est[,4]))
+(sd_tpr <- sd(est[,4]))
+
+# Get freq of 1000 parameters from simulation
+(freq_MN<- sum(str_count(est[,2], "MN")))
+(freq_ZIMN <- sum(str_count(est[,2], "ZIMN")))
+real_MN <- freq_MN- freq_ZIMN
+(freq_MP <- sum(str_count(est[,2], "MP")))
+(freq_ZIMP <- sum(str_count(est[,2], "ZIMP")))
+real_MP <- freq_MP - freq_ZIMP 
+real_MN
+freq_ZIMN
+real_MP
+freq_ZIMP
+
+cutoff <- round(exp(avg_cutoff),0)
+xdf <- as.data.frame(x0)
+values <- xdf$x0
+
+# create visualization of data & cut-off
+ggplot(xdf, aes(x = values)) + 
+  geom_histogram(aes(y = ..density..), binwidth = 1, fill="blue") + 
+  geom_density()+
+  geom_vline(xintercept = cutoff, color="black",size=1, show.legend = FALSE)+
+  ggtitle("Scenario 1: Zero-Inflated Mixture Normal (ZIMN) [Cut-off = 49]")+ 
+  labs(x = "Simulated Values from ZIMN distribution", y = "Density")
+
+
+
+
