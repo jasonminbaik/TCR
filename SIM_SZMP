@@ -1,0 +1,210 @@
+library(caret)
+
+# takes the sum of only finite numbers
+sum.finite <- function(x) {
+  sum(x[is.finite(x)])
+}
+
+# create dataframe to store answers
+est <- data.frame(matrix(ncol = 8, nrow = 0))
+colnames(est) <- c("lambda1", "lambda2", "pi0", "pi1", "pi2" ,"cut_off", "FDR", "TPR")
+
+
+for (t in c(1:1000)){
+  # set known truth parameter estimates
+  n <- 100
+  rate1 <- 4
+  rate2 <- 17
+  
+  # generate random uniform numbers between 0 & 1
+  sim <- runif(n, 0, 1)
+  # create dataframe of random values
+  sim <- as.data.frame(sim)
+  
+  # create dataframe for random deviates
+  x <- as.data.frame(matrix(nrow = 0, ncol=1))
+  
+  # create truth dataframe 
+  truth <- data.frame(matrix(nrow = 0, ncol = 1))
+  colnames(truth) <- c("truth")
+  
+  
+  # pi0 = 0.1, pi1 = 0.2, pi2 = 0.7
+  for (y in c(1:n)){
+    if (sim[y,1] < 0.1) {
+      x[y,1] <- 0
+      truth[y,1] <- "zero"
+    } else if (0.1 <= sim[y,1] & sim[y,1] < 0.3) {
+      x[y,1] <- rpois(1, lambda = rate1)
+      truth[y,1] <- "one"
+    } else {
+      x[y,1] <- rpois(1, lambda = rate2)
+      truth[y,1] <- "two"
+    }
+  }
+  
+  # let x can be matrix
+  x <- as.matrix(x[,1])
+  
+  # set random parameters
+  lambda1 <- 2
+  lambda2 <- 15
+
+  pi0 <- 0.2
+  pi1 <- 0.2
+  pi2 <- 1-pi0-pi1
+  
+  # set indicator function for data set x
+  I0 <- as.numeric(x==0)
+  I1 <- as.numeric(x>=0)
+  
+  Q <- 0
+  # starting value of expected value of the log likelihood
+  #initial estimation of E step:
+  pi.p0 <- pi0*I0/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+  pi.p1 <- pi1*dpois(x, lambda1)*I1/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+  pi.p2 <- pi2*dpois(x, lambda2)*I1/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+  
+  #check initial estimates of E steps
+  cbind(pi.p0,pi.p1,pi.p2,x)
+  
+  Q[2] <- sum.finite(pi.p0*log(pi0)+ pi.p1 * log(pi1*dpois(x, lambda1))+pi.p2 * log(pi2*dpois(x, lambda2)))
+  
+  k <- 2
+  
+  while (abs(Q[k]-Q[k-1])>=1e-6) {
+    ###### E step ######
+    
+    pi.p0 <- pi0*I0/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+    pi.p1 <- pi1*dpois(x, lambda1)*I1/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+    pi.p2 <- pi2*dpois(x, lambda2)*I1/(pi0*I0+pi1*dpois(x, lambda1)*I1 + pi2*dpois(x, lambda2)*I1)
+    
+    ###### M step ######
+    pi0 <- sum.finite(pi.p0) / length(x)
+    pi1 <- sum.finite(pi.p1) / length(x)
+    pi2 <- sum.finite(pi.p2) / length(x)
+    
+    # recalculate lambda's
+    lambda1 <- sum.finite(pi.p1 * x) / sum.finite(pi.p1)
+    lambda2 <- sum.finite(pi.p2 * x) / sum.finite(pi.p2)
+    
+    
+    k <- k + 1
+    Q[k] <- sum.finite(pi.p0*log(pi0)+ pi.p1 * log(pi1*dpois(x, lambda1))+pi.p2 * log(pi2*dpois(x, lambda2)))
+  }
+  
+  p.cut <- 0.95
+  poster.lik <- function(x)
+  {
+    i0 <- as.numeric(x==0)
+    # x%%1 means integer divide x by 1 and return the remainder, other words: if its an integer.
+    i1 <- as.numeric(x%%1==0 & x>=0)
+    # posterior probability of fA(x), with x's sorted. 
+    (pi2*dpois(x, lambda2)*i1) / ((pi0*i0) + (pi1*dpois(x, lambda1)*i1) + (pi2*dpois(x, lambda2))*i1)
+  }
+  
+  # sort the randomly generated numbers
+  x.sorted <- sort(x)
+  # combine sorted numbers and their posterior probability
+  matrix.lik <- cbind(x.sorted,poster.lik(x.sorted))
+  # determine which posterior prob. is greater than 0.95
+  index <- which(matrix.lik[,2]>p.cut)
+  # find the root
+  roots <- matrix.lik[index[1],1]
+  
+  
+  # create decision dataframe
+  dec <- data.frame(matrix(nrow = 0, ncol = 1))
+  colnames(dec) <- c("decision")
+  
+  # truth has zero values, need to account for zero
+  for (y in c(1:n)){
+    if (x[y,1] == 0) {
+      truth[y,1] <- "one"
+    } else {
+      truth[y,1] <- truth[y,1]
+    }
+  }
+  
+  # using the cut-off value, make decision
+  for (r in c(1:n)){
+    if (x[r,1] <= roots){
+      dec[r,1] <- "one"
+    } else {
+      dec[r,1] <- "two"
+    }
+  }
+  
+  # change truth and dec data.frame values into factors
+  truth[,1] <- as.factor(truth[,1])
+  truth[,1] <- factor(truth[,1], levels=c("two", "one"))
+  dec[,1] <- as.factor(dec[,1])
+  dec[,1] <- factor(dec[,1], levels=c("two", "one"))
+  
+  # confusion matrix (predicted, actual)
+  cm <- confusionMatrix(dec[,1], truth[,1])
+  
+  # calculate the FDR
+  fdr <- cm$table[1,2] / (cm$table[1,2] + cm$table[1,1])
+  
+  # calculate the TPR
+  tpr <- cm$table[1,1] / (cm$table[1,1] + cm$table[2,1])
+  
+  
+  # save all parameter and other values
+  add <- list(lambda1, lambda2, pi0, pi1, pi2 , roots, fdr, tpr)
+  est<- rbind(est, add, stringsAsFactors=FALSE)
+  
+}
+
+# estimate average of 1000 parameters from simulation
+
+avg_lambda1 <- mean(est[,1])
+avg_lambda2 <-mean(est[,2])
+avg_pi0 <- mean(est[,3])
+avg_pi1 <- mean(est[,4])
+avg_pi2 <- mean(est[,5])
+avg_cutoff <- mean(est[,6])
+avg_fdr <- mean(est[,7])
+avg_tpr <- mean(est[,8])
+#View(est)
+
+avg_lambda1
+avg_lambda2
+avg_pi0
+avg_pi1
+avg_pi2
+avg_cutoff
+avg_fdr
+avg_tpr
+
+# create dataframe to store avg parameters
+avg_para <- data.frame(matrix(ncol = 8, nrow = 0))
+
+# save averaged parameters
+inc <- list(avg_lambda1,avg_lambda2,avg_pi0,avg_pi1,avg_pi2,avg_cutoff,avg_fdr,avg_tpr)
+avg_para<- rbind(avg_para, inc)
+colnames(avg_para) <- c("lambda1", "lambda2", "pi0", "pi1", "pi2" ,"cut_off", "FDR", "TPR")
+# Estimated Averages
+avg_para
+
+# standard deviation
+
+sd_lambda1 <- sd(est[,1])
+sd_lambda2 <-sd(est[,2])
+sd_pi0 <- sd(est[,3])
+sd_pi1 <- sd(est[,4])
+sd_pi2 <- sd(est[,5])
+sd_cutoff <- sd(est[,6])
+sd_fdr <- sd(est[,7])
+sd_tpr <- sd(est[,8])
+
+# create dataframe to store sd
+est_sd <- data.frame(matrix(ncol = 8, nrow = 0))
+colnames(est_sd) <- c("lambda1", "lambda2", "pi0", "pi1", "pi2" ,"cut_off", "FDR", "TPR")
+
+# save averaged parameters
+ad <- list(sd_lambda1,sd_lambda2,sd_pi0,sd_pi1,sd_pi2, sd_cutoff, sd_fdr,sd_tpr)
+est_sd<- rbind(est_sd, ad)
+# Estimated Standard Deviations
+est_sd
